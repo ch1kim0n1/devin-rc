@@ -73,6 +73,9 @@ install_tmux_linux() {
 }
 
 host_setup() {
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) die "On Windows use the PowerShell version: devin-rc.ps1 (run install.ps1; see README, Windows)." ;;
+  esac
   [[ "$(uname -s)" == "Linux" ]] || die "setup-host currently targets a Linux main PC. macOS/Linux clients are supported."
   install_tmux_linux
   need tailscale "Install Tailscale and sign in first: https://tailscale.com/download"
