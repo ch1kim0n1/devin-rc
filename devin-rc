@@ -1,0 +1,201 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+APP="devin-rc"
+SESSION_DEFAULT="devin"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/devin-rc"
+CONFIG_FILE="$CONFIG_DIR/config"
+SESSION="$SESSION_DEFAULT"
+REMOTE=""
+DEVIN_CMD="${DEVIN_CMD:-devin}"
+
+red(){ printf '\033[31m%s\033[0m\n' "$*" >&2; }
+green(){ printf '\033[32m%s\033[0m\n' "$*"; }
+yellow(){ printf '\033[33m%s\033[0m\n' "$*"; }
+die(){ red "Error: $*"; exit 1; }
+exists(){ command -v "$1" >/dev/null 2>&1; }
+
+load_config() {
+  if [[ -f "$CONFIG_FILE" ]]; then
+    # shellcheck disable=SC1090
+    source "$CONFIG_FILE"
+  fi
+  SESSION="${SESSION:-$SESSION_DEFAULT}"
+  DEVIN_CMD="${DEVIN_CMD:-devin}"
+}
+
+save_config() {
+  mkdir -p "$CONFIG_DIR"
+  umask 077
+  cat > "$CONFIG_FILE" <<CFG
+REMOTE=$(printf '%q' "${REMOTE:-}")
+SESSION=$(printf '%q' "${SESSION:-$SESSION_DEFAULT}")
+DEVIN_CMD=$(printf '%q' "${DEVIN_CMD:-devin}")
+CFG
+}
+
+need() {
+  exists "$1" || die "Missing '$1'. $2"
+}
+
+install_tmux_linux() {
+  if exists tmux; then return 0; fi
+  if exists apt-get; then
+    yellow "Installing tmux with apt..."
+    sudo apt-get update -qq
+    sudo apt-get install -y tmux
+  elif exists dnf; then
+    yellow "Installing tmux with dnf..."
+    sudo dnf install -y tmux
+  elif exists yum; then
+    yellow "Installing tmux with yum..."
+    sudo yum install -y tmux
+  elif exists pacman; then
+    yellow "Installing tmux with pacman..."
+    sudo pacman -S --noconfirm tmux
+  else
+    die "tmux is required and no supported package manager was found."
+  fi
+}
+
+host_setup() {
+  [[ "$(uname -s)" == "Linux" ]] || die "setup-host currently targets a Linux main PC. macOS/Linux clients are supported."
+  install_tmux_linux
+  need tailscale "Install Tailscale and sign in first: https://tailscale.com/download"
+  need "$DEVIN_CMD" "Install Devin CLI: curl -fsSL https://cli.devin.ai/install.sh | bash"
+
+  if ! tailscale status >/dev/null 2>&1; then
+    die "Tailscale is installed but not connected. Run 'sudo tailscale up' and sign in."
+  fi
+
+  yellow "Enabling Tailscale SSH on this PC..."
+  sudo tailscale set --ssh
+
+  local ip user
+  ip="$(tailscale ip -4 | head -n1)"
+  user="$(id -un)"
+  [[ -n "$ip" ]] || die "Could not determine this PC's Tailscale IP."
+
+  REMOTE="$user@$ip"
+  save_config
+
+  green "Host ready."
+  printf '\nOn your laptop, install devin-rc and run:\n\n  devin-rc pair %s\n  devin-rc connect\n\n' "$REMOTE"
+  printf 'Remote target: %s\n' "$REMOTE"
+}
+
+pair_client() {
+  local target="${1:-}"
+  [[ -n "$target" ]] || die "Usage: devin-rc pair user@HOST"
+  REMOTE="$target"
+  save_config
+  green "Saved remote: $REMOTE"
+}
+
+start_devin() {
+  need tmux "Run 'devin-rc setup-host' on the main PC first."
+  need "$DEVIN_CMD" "Install Devin CLI: curl -fsSL https://cli.devin.ai/install.sh | bash"
+  local project="${1:-$PWD}"
+  [[ -d "$project" ]] || die "Project directory does not exist: $project"
+  project="$(cd "$project" && pwd)"
+
+  if tmux has-session -t "$SESSION" 2>/dev/null; then
+    green "Attaching to existing Devin session '$SESSION'."
+    exec tmux attach-session -t "$SESSION"
+  fi
+
+  green "Starting Devin in persistent session '$SESSION' at $project"
+  exec tmux new-session -s "$SESSION" -c "$project" "$DEVIN_CMD"
+}
+
+start_background() {
+  need tmux "Run 'devin-rc setup-host' on the main PC first."
+  need "$DEVIN_CMD" "Install Devin CLI: curl -fsSL https://cli.devin.ai/install.sh | bash"
+  local project="${1:-$PWD}"
+  [[ -d "$project" ]] || die "Project directory does not exist: $project"
+  project="$(cd "$project" && pwd)"
+
+  if tmux has-session -t "$SESSION" 2>/dev/null; then
+    green "Devin session '$SESSION' is already running."
+    return 0
+  fi
+
+  tmux new-session -d -s "$SESSION" -c "$project" "$DEVIN_CMD"
+  green "Started Devin session '$SESSION' in background at $project"
+}
+
+connect_remote() {
+  load_config
+  local target="${1:-${REMOTE:-}}"
+  [[ -n "$target" ]] || die "No main PC paired. Run: devin-rc pair user@HOST"
+  need ssh "An SSH client is required."
+
+  green "Connecting to $target → tmux session '$SESSION'"
+  exec ssh -t "$target" "command -v tmux >/dev/null || { echo 'tmux missing on host'; exit 1; }; tmux has-session -t $(printf '%q' "$SESSION") 2>/dev/null || { echo 'Devin RC session is not running. On the main PC run: devin-rc start <project>'; exit 2; }; exec tmux attach-session -t $(printf '%q' "$SESSION")"
+}
+
+status_local() {
+  need tmux "tmux is not installed."
+  if tmux has-session -t "$SESSION" 2>/dev/null; then
+    green "RUNNING  session=$SESSION"
+    tmux list-clients -t "$SESSION" 2>/dev/null || true
+  else
+    printf 'STOPPED  session=%s\n' "$SESSION"
+  fi
+}
+
+stop_local() {
+  need tmux "tmux is not installed."
+  if tmux has-session -t "$SESSION" 2>/dev/null; then
+    tmux kill-session -t "$SESSION"
+    green "Stopped session '$SESSION'."
+  else
+    printf 'Session %s is not running.\n' "$SESSION"
+  fi
+}
+
+show_info() {
+  load_config
+  printf 'session: %s\n' "$SESSION"
+  printf 'remote:  %s\n' "${REMOTE:-<not paired>}"
+  printf 'config:  %s\n' "$CONFIG_FILE"
+}
+
+usage() {
+  cat <<'TXT'
+devin-rc — persistent remote control for Devin CLI
+
+MAIN PC
+  devin-rc setup-host           One-time Tailscale SSH + tmux setup (Linux host)
+  devin-rc start [project]      Start Devin or attach to the existing session
+  devin-rc bg [project]         Start Devin detached
+  devin-rc status               Show local session status
+  devin-rc stop                 Stop the local Devin session
+
+LAPTOP
+  devin-rc pair user@HOST       Save the main PC's Tailscale address
+  devin-rc connect [user@HOST]  Attach to the exact persistent Devin terminal
+
+OTHER
+  devin-rc info                 Show saved target/session
+  devin-rc help                 Show this help
+
+Detach without stopping Devin: Ctrl-b, then d
+TXT
+}
+
+load_config
+cmd="${1:-help}"
+shift || true
+case "$cmd" in
+  setup-host) host_setup "$@" ;;
+  pair) pair_client "$@" ;;
+  start) start_devin "$@" ;;
+  bg|background) start_background "$@" ;;
+  connect|c) connect_remote "$@" ;;
+  status) status_local "$@" ;;
+  stop) stop_local "$@" ;;
+  info) show_info "$@" ;;
+  help|-h|--help) usage ;;
+  *) die "Unknown command '$cmd'. Run: devin-rc help" ;;
+esac
