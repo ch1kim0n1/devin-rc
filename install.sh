@@ -22,7 +22,11 @@ case ":$PATH:" in
     shell_rc="$HOME/.bashrc"
     [[ "${SHELL:-}" == */zsh ]] && shell_rc="$HOME/.zshrc"
     touch "$shell_rc"
-    if ! grep -Fq "$BIN_DIR" "$shell_rc"; then
+    # Match BIN_DIR only as a whole path segment, so e.g. ~/.local/bin2
+    # does not satisfy the check for ~/.local/bin.
+    esc_dir="$(printf '%s' "$BIN_DIR" | sed 's/[][\\.*^$/]/\\&/g')"
+    if ! grep -Eq "(^|[:\"' =])${esc_dir}([:\"' ]|$)" "$shell_rc"; then
+      # shellcheck disable=SC2016
       printf '\n# devin-rc\nexport PATH="%s:$PATH"\n' "$BIN_DIR" >> "$shell_rc"
     fi
     ;;

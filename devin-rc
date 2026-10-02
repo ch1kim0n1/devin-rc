@@ -2,12 +2,14 @@
 set -Eeuo pipefail
 
 APP="devin-rc"
+VERSION="1.1.0"
 SESSION_DEFAULT="devin"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/devin-rc"
 CONFIG_FILE="$CONFIG_DIR/config"
 SESSION="$SESSION_DEFAULT"
 REMOTE=""
 DEVIN_CMD="${DEVIN_CMD:-devin}"
+SSH_OPTS=(-o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=2)
 
 red(){ printf '\033[31m%s\033[0m\n' "$*" >&2; }
 green(){ printf '\033[32m%s\033[0m\n' "$*"; }
@@ -34,8 +36,20 @@ DEVIN_CMD=$(printf '%q' "${DEVIN_CMD:-devin}")
 CFG
 }
 
+# tmux forbids ':' and '.' in session names; restricting to a safe charset also
+# keeps the remote ssh command quoting-trivial.
+validate_session() {
+  [[ "$SESSION" =~ ^[a-zA-Z0-9_-]+$ ]] \
+    || die "Invalid session name '$SESSION' (allowed: letters, digits, - and _)"
+}
+
 need() {
   exists "$1" || die "Missing '$1'. $2"
+}
+
+# DEVIN_CMD may include arguments (e.g. "devin --model x"); check its binary.
+need_devin() {
+  need "${DEVIN_CMD%%[[:space:]]*}" "Install Devin CLI: curl -fsSL https://cli.devin.ai/install.sh | bash"
 }
 
 install_tmux_linux() {
@@ -62,7 +76,7 @@ host_setup() {
   [[ "$(uname -s)" == "Linux" ]] || die "setup-host currently targets a Linux main PC. macOS/Linux clients are supported."
   install_tmux_linux
   need tailscale "Install Tailscale and sign in first: https://tailscale.com/download"
-  need "$DEVIN_CMD" "Install Devin CLI: curl -fsSL https://cli.devin.ai/install.sh | bash"
+  need_devin
 
   if ! tailscale status >/dev/null 2>&1; then
     die "Tailscale is installed but not connected. Run 'sudo tailscale up' and sign in."
@@ -87,6 +101,8 @@ host_setup() {
 pair_client() {
   local target="${1:-}"
   [[ -n "$target" ]] || die "Usage: devin-rc pair user@HOST"
+  [[ "$target" != -* && "$target" != *[[:space:]]* ]] \
+    || die "Invalid target '$target' (expected: user@HOST or HOST)"
   REMOTE="$target"
   save_config
   green "Saved remote: $REMOTE"
@@ -94,7 +110,7 @@ pair_client() {
 
 start_devin() {
   need tmux "Run 'devin-rc setup-host' on the main PC first."
-  need "$DEVIN_CMD" "Install Devin CLI: curl -fsSL https://cli.devin.ai/install.sh | bash"
+  need_devin
   local project="${1:-$PWD}"
   [[ -d "$project" ]] || die "Project directory does not exist: $project"
   project="$(cd "$project" && pwd)"
@@ -110,7 +126,7 @@ start_devin() {
 
 start_background() {
   need tmux "Run 'devin-rc setup-host' on the main PC first."
-  need "$DEVIN_CMD" "Install Devin CLI: curl -fsSL https://cli.devin.ai/install.sh | bash"
+  need_devin
   local project="${1:-$PWD}"
   [[ -d "$project" ]] || die "Project directory does not exist: $project"
   project="$(cd "$project" && pwd)"
@@ -125,22 +141,34 @@ start_background() {
 }
 
 connect_remote() {
-  load_config
   local target="${1:-${REMOTE:-}}"
   [[ -n "$target" ]] || die "No main PC paired. Run: devin-rc pair user@HOST"
   need ssh "An SSH client is required."
 
   green "Connecting to $target → tmux session '$SESSION'"
-  exec ssh -t "$target" "command -v tmux >/dev/null || { echo 'tmux missing on host'; exit 1; }; tmux has-session -t $(printf '%q' "$SESSION") 2>/dev/null || { echo 'Devin RC session is not running. On the main PC run: devin-rc start <project>'; exit 2; }; exec tmux attach-session -t $(printf '%q' "$SESSION")"
+  exec ssh -t "${SSH_OPTS[@]}" "$target" "command -v tmux >/dev/null || { echo 'tmux missing on host'; exit 1; }; tmux has-session -t '$SESSION' 2>/dev/null || { echo 'Devin RC session is not running. On the main PC run: devin-rc start <project>'; exit 2; }; exec tmux attach-session -t '$SESSION'"
 }
 
-status_local() {
-  need tmux "tmux is not installed."
-  if tmux has-session -t "$SESSION" 2>/dev/null; then
-    green "RUNNING  session=$SESSION"
+status_cmd() {
+  if exists tmux && tmux has-session -t "$SESSION" 2>/dev/null; then
+    green "LOCAL  RUNNING   session=$SESSION"
     tmux list-clients -t "$SESSION" 2>/dev/null || true
   else
-    printf 'STOPPED  session=%s\n' "$SESSION"
+    printf 'LOCAL  STOPPED   session=%s\n' "$SESSION"
+  fi
+
+  if [[ -n "${REMOTE:-}" ]]; then
+    if ! exists ssh; then
+      printf 'REMOTE UNKNOWN   host=%s (no ssh client)\n' "$REMOTE"
+      return 0
+    fi
+    local out
+    if out="$(ssh "${SSH_OPTS[@]}" -o BatchMode=yes "$REMOTE" \
+      "if command -v tmux >/dev/null && tmux has-session -t '$SESSION' 2>/dev/null; then echo RUNNING; else echo STOPPED; fi" 2>/dev/null)"; then
+      printf 'REMOTE %-9s host=%s session=%s\n' "$out" "$REMOTE" "$SESSION"
+    else
+      printf 'REMOTE UNREACHABLE host=%s\n' "$REMOTE"
+    fi
   fi
 }
 
@@ -154,11 +182,31 @@ stop_local() {
   fi
 }
 
+list_sessions() {
+  printf '%s\n' "-- local --"
+  if exists tmux; then
+    tmux ls 2>/dev/null || printf '(none)\n'
+  else
+    printf 'tmux not installed\n'
+  fi
+  if [[ -n "${REMOTE:-}" ]]; then
+    printf '%s\n' "-- $REMOTE --"
+    if exists ssh; then
+      ssh "${SSH_OPTS[@]}" -o BatchMode=yes "$REMOTE" \
+        "command -v tmux >/dev/null && tmux ls 2>/dev/null || true" \
+        || printf '(unreachable)\n'
+    else
+      printf '(no ssh client)\n'
+    fi
+  fi
+}
+
 show_info() {
-  load_config
   printf 'session: %s\n' "$SESSION"
   printf 'remote:  %s\n' "${REMOTE:-<not paired>}"
+  printf 'devin:   %s\n' "$DEVIN_CMD"
   printf 'config:  %s\n' "$CONFIG_FILE"
+  printf 'version: %s\n' "$VERSION"
 }
 
 usage() {
@@ -169,7 +217,7 @@ MAIN PC
   devin-rc setup-host           One-time Tailscale SSH + tmux setup (Linux host)
   devin-rc start [project]      Start Devin or attach to the existing session
   devin-rc bg [project]         Start Devin detached
-  devin-rc status               Show local session status
+  devin-rc status               Show local + remote session status
   devin-rc stop                 Stop the local Devin session
 
 LAPTOP
@@ -177,14 +225,38 @@ LAPTOP
   devin-rc connect [user@HOST]  Attach to the exact persistent Devin terminal
 
 OTHER
+  devin-rc ls                   List local and remote tmux sessions
   devin-rc info                 Show saved target/session
+  devin-rc version              Print version
   devin-rc help                 Show this help
+
+OPTIONS (before the command)
+  -s, --session NAME            Use session NAME (default: devin)
+                                Letters, digits, - and _ only
+
+Multiple sessions: run each project under its own name, e.g.
+  devin-rc -s web bg ~/code/web
+  devin-rc -s api bg ~/code/api
+  devin-rc -s web connect
 
 Detach without stopping Devin: Ctrl-b, then d
 TXT
 }
 
 load_config
+while [[ "${1:-}" == -* ]]; do
+  case "$1" in
+    -s|--session)
+      [[ $# -ge 2 && "$2" != -* ]] || die "$1 requires a session name"
+      SESSION="$2"; shift 2 ;;
+    -V|--version|version)
+      printf '%s %s\n' "$APP" "$VERSION"; exit 0 ;;
+    -h|--help)
+      usage; exit 0 ;;
+    *) die "Unknown flag '$1'. Run: devin-rc help" ;;
+  esac
+done
+validate_session
 cmd="${1:-help}"
 shift || true
 case "$cmd" in
@@ -193,9 +265,11 @@ case "$cmd" in
   start) start_devin "$@" ;;
   bg|background) start_background "$@" ;;
   connect|c) connect_remote "$@" ;;
-  status) status_local "$@" ;;
+  status) status_cmd "$@" ;;
   stop) stop_local "$@" ;;
+  ls|sessions) list_sessions "$@" ;;
   info) show_info "$@" ;;
-  help|-h|--help) usage ;;
+  version) printf '%s %s\n' "$APP" "$VERSION" ;;
+  help) usage ;;
   *) die "Unknown command '$cmd'. Run: devin-rc help" ;;
 esac

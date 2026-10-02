@@ -80,10 +80,25 @@ devin-rc start [project]
 devin-rc bg [project]
 devin-rc connect [user@host]
 devin-rc pair user@host
-devin-rc status
+devin-rc status          # local + remote state
+devin-rc ls              # list local + remote tmux sessions
 devin-rc stop
 devin-rc info
+devin-rc version
 ```
+
+Multiple concurrent sessions are supported via `-s`/`--session` (placed before
+the command) or the `SESSION` environment variable. Session names are limited
+to letters, digits, `-` and `_` (tmux forbids `.` and `:`):
+
+```bash
+devin-rc -s web bg ~/code/web
+devin-rc -s api bg ~/code/api
+devin-rc -s web connect
+```
+
+`DEVIN_CMD` may include arguments (e.g. `DEVIN_CMD="devin --model x"`), and is
+persisted by `setup-host`/`pair` in `~/.config/devin-rc/config`.
 
 ## Important limitation
 
