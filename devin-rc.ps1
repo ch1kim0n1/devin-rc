@@ -169,7 +169,11 @@ function Stop-Local {
 
 function List-Sessions {
     Write-Host '-- local (WSL) --'
-    if (Exists 'wsl.exe') { Wsl-Run @('tmux', 'ls') 2>$null; if ($LASTEXITCODE -ne 0) { Write-Host '(none)' } } else { Write-Host 'WSL not installed' }
+    if (Exists 'wsl.exe') {
+        # capture first: a broken distro prints errors on stdout, which '2>$null' can't hide
+        $lsOut = Wsl-Run @('tmux', 'ls') 2>$null | Out-String
+        if ($LASTEXITCODE -eq 0 -and $lsOut) { $lsOut.TrimEnd() } else { Write-Host '(none)' }
+    } else { Write-Host 'WSL not installed' }
     if ($script:cfg.remote) {
         Write-Host "-- $($script:cfg.remote) --"
         if (Exists 'ssh.exe') {

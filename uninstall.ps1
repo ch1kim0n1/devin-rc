@@ -6,5 +6,8 @@ $user = [Environment]::GetEnvironmentVariable('Path', 'User')
 $new = (@($user -split ';' | Where-Object { $_ -and $_ -ne $bin })) -join ';'
 if ($new -ne $user) { [Environment]::SetEnvironmentVariable('Path', $new, 'User') }
 Remove-Item -Recurse -Force $Prefix -ErrorAction SilentlyContinue
-if ($Purge) { Remove-Item -Recurse -Force (Join-Path $env:APPDATA 'devin-rc') -ErrorAction SilentlyContinue }
+if ($Purge) {
+    $cfgDir = if ($env:DEVIN_RC_HOME) { $env:DEVIN_RC_HOME } else { Join-Path $env:APPDATA 'devin-rc' }
+    Remove-Item -Recurse -Force $cfgDir -ErrorAction SilentlyContinue
+}
 Write-Host "devin-rc removed."
