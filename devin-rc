@@ -52,6 +52,13 @@ need_devin() {
   need "${DEVIN_CMD%%[[:space:]]*}" "Install Devin CLI: curl -fsSL https://cli.devin.ai/install.sh | bash"
 }
 
+install_tmux_macos() {
+  if exists tmux; then return 0; fi
+  need brew "Install Homebrew first: https://brew.sh — then: brew install tmux"
+  yellow "Installing tmux with brew..."
+  brew install tmux
+}
+
 install_tmux_linux() {
   if exists tmux; then return 0; fi
   if exists apt-get; then
@@ -73,8 +80,11 @@ install_tmux_linux() {
 }
 
 host_setup() {
-  [[ "$(uname -s)" == "Linux" ]] || die "setup-host currently targets a Linux main PC. macOS/Linux clients are supported."
-  install_tmux_linux
+  case "$(uname -s)" in
+    Linux)  install_tmux_linux ;;
+    Darwin) install_tmux_macos ;;
+    *) die "setup-host supports Linux and macOS hosts. Clients can be macOS or Linux." ;;
+  esac
   need tailscale "Install Tailscale and sign in first: https://tailscale.com/download"
   need_devin
 
@@ -83,7 +93,9 @@ host_setup() {
   fi
 
   yellow "Enabling Tailscale SSH on this PC..."
-  sudo tailscale set --ssh
+  # Requires the standalone tailscaled build; the macOS App Store app has no SSH server.
+  sudo tailscale set --ssh \
+    || die "Could not enable Tailscale SSH. On macOS use the standalone Tailscale (https://tailscale.com/download/macos or 'brew install tailscale'), not the App Store build."
 
   local ip user
   ip="$(tailscale ip -4 | head -n1)"
@@ -214,7 +226,7 @@ usage() {
 devin-rc — persistent remote control for Devin CLI
 
 MAIN PC
-  devin-rc setup-host           One-time Tailscale SSH + tmux setup (Linux host)
+  devin-rc setup-host           One-time Tailscale SSH + tmux setup (Linux/macOS host)
   devin-rc start [project]      Start Devin or attach to the existing session
   devin-rc bg [project]         Start Devin detached
   devin-rc status               Show local + remote session status

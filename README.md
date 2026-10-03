@@ -6,11 +6,11 @@ It does **not** clone or hand off the Devin session. Devin runs on the main PC i
 
 ## Requirements
 
-- Main PC: Linux, Devin CLI, Tailscale
+- Main PC: macOS or Linux, Devin CLI, Tailscale
 - Laptop: macOS or Linux, Tailscale + SSH
 - Both devices signed into the same Tailscale network
 
-Devin CLI itself supports macOS, Linux, and Windows. This v1 intentionally targets a Linux host because Tailscale SSH + tmux is the smallest reliable setup.
+On macOS, `setup-host` installs tmux via Homebrew and requires the **standalone** Tailscale build (`brew install tailscale` or the package from tailscale.com) — the App Store app does not include the SSH server.
 
 ## 1. Install on both machines
 
