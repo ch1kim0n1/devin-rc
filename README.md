@@ -8,20 +8,32 @@ It does **not** clone or hand off the Devin session. Devin runs on the main PC i
 
 ## Requirements
 
-- Main PC: macOS or Linux, Devin CLI, Tailscale
-- Laptop: macOS or Linux, Tailscale + SSH
-- iPhone: iOS with Tailscale + an SSH app (Blink Shell, Termius, or iSH)
+- Main PC: Linux, macOS, or Windows (WSL2) — Devin CLI, tmux, Tailscale
+- Client: any of the above, or an iPhone (Tailscale + an SSH app: Blink Shell, Termius, or iSH)
 - All devices signed into the same Tailscale network
+
+Two interchangeable implementations ship in this repo — pick either on any OS:
+
+| Port | Runs on |
+|---|---|
+| `devin-rc` (bash) | Linux, macOS, Git Bash on Windows (client only) |
+| `devin-rc.ps1` (PowerShell) | Windows (5.1/7), Linux and macOS via `pwsh` — host side uses WSL2 on Windows, native tmux elsewhere |
+
+Both expose the same commands and config semantics.
 
 On macOS, `setup-host` installs tmux via Homebrew and requires the **standalone** Tailscale build (`brew install tailscale` or the package from tailscale.com) — the App Store app does not include the SSH server.
 
 ## 1. Install on both machines
 
-Copy this folder to each machine, then:
+Copy this folder to each machine, then run the installer for your shell:
 
 ```bash
-./install.sh
+./install.sh        # Linux / macOS / Git Bash  (installs the bash port)
 exec "$SHELL" -l
+```
+
+```powershell
+.\install.ps1       # Windows, or Linux/macOS with pwsh installed
 ```
 
 ## 2. Main PC: one-time host setup
@@ -129,9 +141,12 @@ devin-rc:api> /quit
 shell return to the prompt instead of exiting, and detaching from a
 `/connect`ed terminal drops you back into the shell rather than closing it.
 
-## Windows
+## Windows & PowerShell (cross-platform port)
 
-Native Windows support is a PowerShell port (`devin-rc.ps1`, works in Windows PowerShell 5.1 and PowerShell 7) with the same commands.
+`devin-rc.ps1` is the platform-agnostic port — Windows PowerShell 5.1 and
+PowerShell 7 on Windows, and `pwsh` on Linux/macOS. On Windows the host side
+runs Devin inside **WSL2** (tmux has no native Windows build); on Linux/macOS
+it uses the OS's native tmux, exactly like the bash port.
 
 ```powershell
 .\install.ps1            # per-user install, adds devin-rc to your user PATH (no admin); -NoPath to skip, -Prefix to relocate

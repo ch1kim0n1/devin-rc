@@ -1,12 +1,17 @@
 #Requires -Version 5.1
-# devin-rc for Windows (PowerShell 5.1 and 7). Same commands as the bash version.
-#   Client (laptop): pair / connect / status / ls use the built-in OpenSSH client (ssh.exe) and Tailscale for Windows.
-#   Host (main PC): start / bg / stop / setup-host run Devin inside tmux in WSL2 (tmux has no native Windows build).
+# devin-rc — cross-platform: Windows (PowerShell 5.1/7), Linux and macOS (pwsh 7+). Same commands as the bash version.
+#   Client: pair / connect / status / ls / ui use the OpenSSH client (ssh.exe on Windows, ssh elsewhere) over Tailscale.
+#   Host:   start / bg / stop / setup-host run Devin inside tmux — natively on Linux/macOS, inside WSL2 on Windows.
 $ErrorActionPreference = 'Continue'  # native stderr is expected (ssh/wsl failures are handled explicitly via exit codes)
 $App = 'devin-rc'
 $Version = '1.5.0'
 $SessionDefault = 'devin'
-$ConfigDir = if ($env:DEVIN_RC_HOME) { $env:DEVIN_RC_HOME } else { Join-Path $env:APPDATA 'devin-rc' }
+# PS 5.1 (Desktop) is Windows-only; PS7 defines $IsWindows/$IsLinux/$IsMacOS.
+$IsWin  = ($PSVersionTable.PSEdition -eq 'Desktop') -or [bool](Get-Variable IsWindows -ValueOnly -ErrorAction SilentlyContinue)
+$SshExe = if ($IsWin) { 'ssh.exe' } else { 'ssh' }
+$ConfigDir = if ($env:DEVIN_RC_HOME) { $env:DEVIN_RC_HOME }
+    elseif ($IsWin) { Join-Path $env:APPDATA 'devin-rc' }
+    else { Join-Path $(if ($env:XDG_CONFIG_HOME) { $env:XDG_CONFIG_HOME } else { Join-Path $HOME '.config' }) 'devin-rc' }
 $ConfigFile = Join-Path $ConfigDir 'config.json'
 $SshOpts = @('-o', 'ConnectTimeout=10', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=2')
 
@@ -36,25 +41,60 @@ function Save-Config {
 # tmux forbids ':' and '.' in session names; the safe charset also keeps the remote ssh command quoting-trivial.
 function Test-Session { if ($script:cfg.session -notmatch '^[a-zA-Z0-9_-]+$') { Die "Invalid session name '$($script:cfg.session)' (allowed: letters, digits, - and _)" } }
 
-# ---- WSL helpers (host side)
+# ---- host-side tmux helpers: on Windows tmux lives inside WSL; on Linux/macOS it is native.
 function Wsl-Args { if ($script:cfg.distro) { return @('-d', $script:cfg.distro) } else { return @() } }
 function Wsl-Run { param([string[]]$Cmd) & wsl.exe @(Wsl-Args) -e @Cmd }          # exec without a shell
 function Wsl-RunAt { param([string]$Dir, [string[]]$Cmd) & wsl.exe @(Wsl-Args) '--cd' $Dir '-e' @Cmd }  # same, starting in Dir
 function Wsl-Ok  { param([string[]]$Cmd) & wsl.exe @(Wsl-Args) -e @Cmd *> $null; return ($LASTEXITCODE -eq 0) }
-function Need-Wsl {
-    if (-not (Exists 'wsl.exe')) { Die "WSL is required to host Devin on Windows (tmux has no native build). Run: wsl --install" }
-    if (-not (Wsl-Ok @('true'))) { Die "The WSL distro could not start. Check 'wsl -l -v'; reinstall or repair it, or set DEVIN_RC_DISTRO to a working distro." }
+# Tmux-* take a command argv starting with 'tmux' and run it in the right place for this OS.
+function Tmux-Run { param([string[]]$Cmd) if ($IsWin) { Wsl-Run $Cmd } else { & $Cmd[0] @($Cmd | Select-Object -Skip 1) } }
+function Tmux-Ok  { param([string[]]$Cmd) if ($IsWin) { return (Wsl-Ok $Cmd) } & $Cmd[0] @($Cmd | Select-Object -Skip 1) *> $null; return ($LASTEXITCODE -eq 0) }
+function Need-Tmux {
+    if ($IsWin) {
+        if (-not (Exists 'wsl.exe')) { Die "WSL is required to host Devin on Windows (tmux has no native build). Run: wsl --install" }
+        if (-not (Wsl-Ok @('true'))) { Die "The WSL distro could not start. Check 'wsl -l -v'; reinstall or repair it, or set DEVIN_RC_DISTRO to a working distro." }
+        if (-not (Wsl-Ok @('tmux', '-V'))) { Die "tmux is missing inside WSL. Run: devin-rc setup-host" }
+    } elseif (-not (Exists 'tmux')) { Die "tmux is required. Run 'devin-rc setup-host' or install it (apt/dnf/brew install tmux)." }
 }
-function Need-Tmux { Need-Wsl; if (-not (Wsl-Ok @('tmux', '-V'))) { Die "tmux is missing inside WSL. Run: devin-rc setup-host" } }
 function Need-Devin {
     $bin = ($script:cfg.devin -split '\s+')[0]
-    if (-not (Wsl-Ok @('bash', '-lc', "command -v $bin"))) { Die "'$bin' was not found inside WSL (Devin must run in the same Linux environment as tmux). Install the Linux Devin CLI in WSL: curl -fsSL https://cli.devin.ai/install.sh | bash" }
+    if ($IsWin) {
+        if (-not (Wsl-Ok @('bash', '-lc', "command -v $bin"))) { Die "'$bin' was not found inside WSL (Devin must run in the same Linux environment as tmux). Install the Linux Devin CLI in WSL: curl -fsSL https://cli.devin.ai/install.sh | bash" }
+    } elseif (-not (Exists $bin)) { Die "'$bin' not found. Install Devin CLI: curl -fsSL https://cli.devin.ai/install.sh | bash" }
 }
-function Local-Running { return ((Exists 'wsl.exe') -and (Wsl-Ok @('tmux', 'has-session', '-t', $script:cfg.session))) }
+function Local-Running {
+    if ($IsWin) { return ((Exists 'wsl.exe') -and (Wsl-Ok @('tmux', 'has-session', '-t', $script:cfg.session))) }
+    return ((Exists 'tmux') -and (Tmux-Ok @('tmux', 'has-session', '-t', $script:cfg.session)))
+}
 
 # ---- commands
 function Host-Setup {
-    Need-Wsl
+    if (-not $IsWin) {
+        # POSIX host: native tmux + Devin + Tailscale SSH (same flow as the bash port)
+        if (-not (Exists 'tmux')) {
+            if (Exists 'brew') { Yellow 'Installing tmux with brew...'; & brew install tmux }
+            elseif (Exists 'apt-get') { Yellow 'Installing tmux with apt...'; & sudo apt-get update -qq; & sudo apt-get install -y tmux }
+            elseif (Exists 'dnf') { & sudo dnf install -y tmux }
+            elseif (Exists 'pacman') { & sudo pacman -S --noconfirm tmux }
+            else { Die 'tmux is required and no supported package manager was found.' }
+        }
+        if (-not (Exists 'tailscale')) { Die 'Install Tailscale and sign in first: https://tailscale.com/download' }
+        Need-Devin
+        & tailscale status *> $null
+        if ($LASTEXITCODE -ne 0) { Die "Tailscale is installed but not connected. Run 'sudo tailscale up' and sign in." }
+        Yellow 'Enabling Tailscale SSH on this machine...'
+        & sudo tailscale set --ssh
+        if ($LASTEXITCODE -ne 0) { Die "Could not enable Tailscale SSH. On macOS use the standalone Tailscale (tailscale.com/download/macos or 'brew install tailscale'), not the App Store build." }
+        $ip = (& tailscale ip -4 2>$null | Select-Object -First 1)
+        $user = (& id -un 2>$null); if (-not $user) { $user = $env:USER }
+        if (-not $ip) { Die "Could not determine this machine's Tailscale IP." }
+        $remote = "$user@$ip"; $script:cfg.remote = $remote; Save-Config
+        Green 'Host ready.'
+        Write-Host ''; Write-Host 'On your laptop, install devin-rc and run:'
+        Write-Host "  devin-rc pair $remote"; Write-Host '  devin-rc connect'; return
+    }
+    if (-not (Exists 'wsl.exe')) { Die "WSL is required to host Devin on Windows (tmux has no native build). Run: wsl --install" }
+    if (-not (Wsl-Ok @('true'))) { Die "The WSL distro could not start. Check 'wsl -l -v'; reinstall or repair it, or set DEVIN_RC_DISTRO to a working distro." }
     if (-not (Wsl-Ok @('tmux', '-V'))) {
         Yellow "Installing tmux in WSL (apt, as root inside the distro)..."
         & wsl.exe @(Wsl-Args) -u root -e bash -lc 'apt-get update -qq && apt-get install -y tmux'
@@ -112,7 +152,7 @@ function Start-Devin {
     if (Local-Running) {
         if ($Background) { Green "Devin session '$s' is already running."; return }
         Green "Attaching to existing Devin session '$s'."
-        Wsl-Run @('tmux', 'attach-session', '-t', $s); if (-not $script:InUi) { exit $LASTEXITCODE }
+        Tmux-Run @('tmux', 'attach-session', '-t', $s); if (-not $script:InUi) { exit $LASTEXITCODE }
         return
     }
     # wsl --cd takes the Windows path and sets the new session's working
@@ -120,12 +160,15 @@ function Start-Devin {
     # break on paths with spaces on WSL versions that re-split -e arguments).
     $full = (Resolve-Path -LiteralPath $Project).Path
     if ($Background) {
-        Wsl-RunAt $full @('tmux', 'new-session', '-d', '-s', $s, $script:cfg.devin)
+        if ($IsWin) { Wsl-RunAt $full @('tmux', 'new-session', '-d', '-s', $s, $script:cfg.devin) }
+        else { & tmux new-session -d -s $s -c $full $script:cfg.devin }
         if ($LASTEXITCODE -ne 0) { Die "tmux could not start the session." }
         Green "Started Devin session '$s' in background at $full"; return
     }
     Green "Starting Devin in persistent session '$s' at $full"
-    Wsl-RunAt $full @('tmux', 'new-session', '-s', $s, $script:cfg.devin); if (-not $script:InUi) { exit $LASTEXITCODE }
+    if ($IsWin) { Wsl-RunAt $full @('tmux', 'new-session', '-s', $s, $script:cfg.devin) }
+    else { & tmux new-session -s $s -c $full $script:cfg.devin }
+    if (-not $script:InUi) { exit $LASTEXITCODE }
 }
 
 # Remote command: a POSIX host gets the same tmux one-liner as the bash version; a Windows (WSL) host gets a cmd.exe line.
@@ -146,9 +189,9 @@ function Remote-State-Cmd {
 function Connect-Remote {
     $target = $(if ($args[0]) { $args[0] } else { $script:cfg.remote })
     if (-not $target) { Die "No main PC paired. Run: devin-rc pair user@HOST" }
-    if (-not (Exists 'ssh.exe')) { Die "The OpenSSH client is required (Settings > Optional features > OpenSSH Client)." }
+    if (-not (Exists $SshExe)) { Die "An OpenSSH client is required$(if ($IsWin) { ' (Settings > Optional features > OpenSSH Client)' } else { ' (install openssh-client)' })." }
     Green "Connecting to $target -> tmux session '$($script:cfg.session)'"
-    & ssh.exe -t @SshOpts $target (Remote-Attach-Cmd); if (-not $script:InUi) { exit $LASTEXITCODE }
+    & $SshExe -t @SshOpts $target (Remote-Attach-Cmd); if (-not $script:InUi) { exit $LASTEXITCODE }
 }
 
 function Show-UiHelp {
@@ -207,7 +250,7 @@ function Iphone-Help {
     $remote = $script:cfg.remote
     if (-not $remote) { Die "No main PC paired. Run: devin-rc pair user@HOST" }
     $attach = Remote-Attach-Cmd
-    if ($remote -match '@') { $user, $host_ = $remote -split '@', 2 } else { $user = $env:USERNAME; $host_ = $remote }
+    if ($remote -match '@') { $user, $host_ = $remote -split '@', 2 } else { $user = $(if ($env:USERNAME) { $env:USERNAME } else { $env:USER }); $host_ = $remote }
     Write-Host ""
     Write-Host "iPhone setup"
     Write-Host "  1. Install Tailscale (App Store) and sign in to the same tailnet."
@@ -228,8 +271,8 @@ function Show-Status {
     $s = $script:cfg.session
     if (Local-Running) { Green "LOCAL  RUNNING   session=$s" } else { Write-Host "LOCAL  STOPPED   session=$s" }
     if ($script:cfg.remote) {
-        if (-not (Exists 'ssh.exe')) { Write-Host "REMOTE UNKNOWN   host=$($script:cfg.remote) (no ssh client)"; return }
-        $out = (& ssh.exe @SshOpts -o BatchMode=yes $script:cfg.remote (Remote-State-Cmd) 2>$null | Out-String).Trim()
+        if (-not (Exists $SshExe)) { Write-Host "REMOTE UNKNOWN   host=$($script:cfg.remote) (no ssh client)"; return }
+        $out = (& $SshExe @SshOpts -o BatchMode=yes $script:cfg.remote (Remote-State-Cmd) 2>$null | Out-String).Trim()
         if ($LASTEXITCODE -eq 0 -and $out) { Write-Host ("REMOTE {0,-9} host={1} session={2}" -f $out, $script:cfg.remote, $s) }
         else { Write-Host "REMOTE UNREACHABLE host=$($script:cfg.remote)" }
     }
@@ -237,23 +280,24 @@ function Show-Status {
 
 function Stop-Local {
     Need-Tmux
-    if (Local-Running) { Wsl-Run @('tmux', 'kill-session', '-t', $script:cfg.session); Green "Stopped session '$($script:cfg.session)'." }
+    if (Local-Running) { Tmux-Run @('tmux', 'kill-session', '-t', $script:cfg.session); Green "Stopped session '$($script:cfg.session)'." }
     else { Write-Host "Session $($script:cfg.session) is not running." }
 }
 
 function List-Sessions {
-    Write-Host '-- local (WSL) --'
-    if (Exists 'wsl.exe') {
-        # capture first: a broken distro prints errors on stdout, which '2>$null' can't hide
-        $lsOut = Wsl-Run @('tmux', 'ls') 2>$null | Out-String
+    Write-Host $(if ($IsWin) { '-- local (WSL) --' } else { '-- local --' })
+    $has = if ($IsWin) { Exists 'wsl.exe' } else { Exists 'tmux' }
+    if ($has) {
+        # capture first: a broken WSL distro prints errors on stdout, which '2>$null' can't hide
+        $lsOut = Tmux-Run @('tmux', 'ls') 2>$null | Out-String
         if ($LASTEXITCODE -eq 0 -and $lsOut) { $lsOut.TrimEnd() } else { Write-Host '(none)' }
-    } else { Write-Host 'WSL not installed' }
+    } else { Write-Host $(if ($IsWin) { 'WSL not installed' } else { 'tmux not installed' }) }
     if ($script:cfg.remote) {
         Write-Host "-- $($script:cfg.remote) --"
-        if (Exists 'ssh.exe') {
+        if (Exists $SshExe) {
             $d = $(if ($script:cfg.remote_distro) { "-d $($script:cfg.remote_distro) " } else { '' })
             $cmd = $(if ($script:cfg.remote_mode -eq 'wsl') { "wsl.exe ${d}-e tmux ls" } else { 'command -v tmux >/dev/null && tmux ls 2>/dev/null || true' })
-            & ssh.exe @SshOpts -o BatchMode=yes $script:cfg.remote $cmd
+            & $SshExe @SshOpts -o BatchMode=yes $script:cfg.remote $cmd
             if ($LASTEXITCODE -ne 0) { Write-Host '(unreachable)' }
         } else { Write-Host '(no ssh client)' }
     }
@@ -270,10 +314,10 @@ function Show-Info {
 
 function Show-Usage {
 @'
-devin-rc (Windows) - persistent remote control for Devin CLI
+devin-rc - persistent remote control for Devin CLI (any OS with PowerShell 7; Windows 5.1 too)
 
-MAIN PC (Windows: Devin runs in tmux inside WSL2)
-  devin-rc setup-host           Check WSL, tmux, Devin, Tailscale; print the OpenSSH Server steps
+MAIN PC (Devin runs in tmux: native on Linux/macOS, inside WSL2 on Windows)
+  devin-rc setup-host           Check tmux, Devin, Tailscale (on Windows also prints the OpenSSH Server steps)
   devin-rc start [project]      Start Devin or attach to the existing session
   devin-rc bg [project]         Start Devin detached
   devin-rc status               Show local + remote session status
@@ -293,7 +337,7 @@ OTHER
 
 OPTIONS (before the command)
   -s, --session NAME            Use session NAME (default: devin); letters, digits, - and _ only
-Environment: DEVIN_CMD (may include arguments), DEVIN_RC_DISTRO (WSL distro), DEVIN_RC_HOME (config directory)
+Environment: DEVIN_CMD (may include arguments), DEVIN_RC_DISTRO (WSL distro, Windows host), DEVIN_RC_HOME (config directory)
 Detach without stopping Devin: Ctrl-b, then d
 '@ | Write-Host
 }

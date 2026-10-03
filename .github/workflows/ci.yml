@@ -25,6 +25,22 @@ jobs:
           test ! -e "$HOME/.local/bin/devin-rc"
           ! grep -q 'devin-rc' "$HOME/.bashrc"
 
+  powershell-posix:
+    runs-on: ubuntu-latest   # pwsh is preinstalled on GitHub runners
+    steps:
+      - uses: actions/checkout@v4
+      - name: smoke test (ps1 on Linux)
+        shell: pwsh
+        run: |
+          ./install.ps1 -NoPath
+          $rc = "$HOME/.local/bin/devin-rc"
+          & $rc help | Out-Null
+          if ((& $rc version) -notmatch 'devin-rc') { throw 'version failed' }
+          & $rc -s test pair ci@100.64.0.1 --wsl --distro Ubuntu-22.04
+          & $rc -s test info
+          ./uninstall.ps1
+          if (Test-Path "$HOME/.local/bin/devin-rc") { throw 'uninstall left files behind' }
+
   powershell:
     runs-on: windows-latest
     steps:
