@@ -4,6 +4,8 @@ A tiny remote-control wrapper for Devin CLI.
 
 It does **not** clone or hand off the Devin session. Devin runs on the main PC inside `tmux`; your laptop attaches to that same pseudo-terminal over Tailscale SSH.
 
+![devin-rc demo](docs/screenshot.png)
+
 ## Requirements
 
 - Main PC: Linux, Devin CLI, Tailscale
@@ -79,13 +81,17 @@ devin-rc setup-host
 devin-rc start [project]
 devin-rc bg [project]
 devin-rc connect [user@host]
-devin-rc pair user@host
+devin-rc pair user@host [--wsl] [--distro NAME]
 devin-rc status          # local + remote state
 devin-rc ls              # list local + remote tmux sessions
 devin-rc stop
 devin-rc info
 devin-rc version
 ```
+
+`pair` also accepts a bare `HOST` (SSH then uses your local username). `--wsl`
+is for hosts running Devin in WSL on Windows; `--distro` names the host's WSL
+distro (default: the host's default distro).
 
 Multiple concurrent sessions are supported via `-s`/`--session` (placed before
 the command) or the `SESSION` environment variable. Session names are limited
@@ -98,7 +104,8 @@ devin-rc -s web connect
 ```
 
 `DEVIN_CMD` may include arguments (e.g. `DEVIN_CMD="devin --model x"`), and is
-persisted by `setup-host`/`pair` in `~/.config/devin-rc/config`.
+persisted by `setup-host`/`pair` in `~/.config/devin-rc/config`. The `SESSION`,
+`REMOTE`, and `DEVIN_CMD` environment variables override the saved config.
 
 ## Windows
 
@@ -119,10 +126,10 @@ Installing also drops a `devin-rc.cmd` shim (cmd/PowerShell) and a `devin-rc` sh
 
 Windows-specific notes:
 
-- Pairing with a Windows host: `devin-rc pair user@HOST --wsl` (the client then attaches through `wsl.exe -e tmux ...`). Pairing with a Linux or macOS host needs no flag.
+- Pairing with a Windows host: `devin-rc pair user@HOST --wsl` (the client then attaches through `wsl.exe -e tmux ...`; add `--distro NAME` if the host uses a non-default WSL distro). Pairing with a Linux or macOS host needs no flag.
 - **Tailscale SSH cannot host on Windows**, so a Windows host needs the Windows OpenSSH Server. `setup-host` checks WSL, tmux, Devin and Tailscale and prints the elevated PowerShell commands for the OpenSSH Server and a firewall rule limited to the Tailscale range; it does not change system settings itself.
 - Multiple WSL distros: set `DEVIN_RC_DISTRO`. Config lives in `%APPDATA%\devin-rc\config.json` (override with `DEVIN_RC_HOME`).
-- The bash version still works as a client under Git Bash; its `setup-host` stops with a pointer to the PowerShell version.
+- The bash version also works as a client under Git Bash, including `pair --wsl`; its `setup-host` stops with a pointer to the PowerShell version.
 - The client side was tested on Windows 11 (PowerShell 7 and 5.1, the cmd and Git Bash shims, install and uninstall). The host side (WSL) is the less tested path: if `wsl -l -v` shows a distro that does not start, repair or reinstall it first.
 
 ## Important limitation
