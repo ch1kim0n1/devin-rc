@@ -87,6 +87,7 @@ devin-rc status          # local + remote state
 devin-rc ls              # list local + remote tmux sessions
 devin-rc stop
 devin-rc iphone          # iPhone (iOS) connect instructions + command
+devin-rc ui              # interactive shell with /slash commands
 devin-rc info
 devin-rc version
 ```
@@ -108,6 +109,25 @@ devin-rc -s web connect
 `DEVIN_CMD` may include arguments (e.g. `DEVIN_CMD="devin --model x"`), and is
 persisted by `setup-host`/`pair` in `~/.config/devin-rc/config`. The `SESSION`,
 `REMOTE`, and `DEVIN_CMD` environment variables override the saved config.
+
+## Interactive shell
+
+`devin-rc ui` opens a small interactive shell whose prompt shows the active
+session. Commands are slash commands mirroring the regular ones (plain words
+work too):
+
+```text
+devin-rc:web> /pair vlad@100.101.102.103
+devin-rc:web> /status
+devin-rc:web> /session api      # switch active session
+devin-rc:api> /connect          # attach; Ctrl-b d detaches back to the prompt
+devin-rc:api> /quit
+```
+
+`/help` lists everything (`/status`, `/ls`, `/connect`, `/start`, `/bg`,
+`/stop`, `/pair`, `/session`, `/info`, `/iphone`, `/quit`). Errors inside the
+shell return to the prompt instead of exiting, and detaching from a
+`/connect`ed terminal drops you back into the shell rather than closing it.
 
 ## Windows
 

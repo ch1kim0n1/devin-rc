@@ -4,7 +4,7 @@
 #   Host (main PC): start / bg / stop / setup-host run Devin inside tmux in WSL2 (tmux has no native Windows build).
 $ErrorActionPreference = 'Continue'  # native stderr is expected (ssh/wsl failures are handled explicitly via exit codes)
 $App = 'devin-rc'
-$Version = '1.4.0'
+$Version = '1.5.0'
 $SessionDefault = 'devin'
 $ConfigDir = if ($env:DEVIN_RC_HOME) { $env:DEVIN_RC_HOME } else { Join-Path $env:APPDATA 'devin-rc' }
 $ConfigFile = Join-Path $ConfigDir 'config.json'
@@ -13,7 +13,7 @@ $SshOpts = @('-o', 'ConnectTimeout=10', '-o', 'ServerAliveInterval=15', '-o', 'S
 function Red($m)    { Write-Host $m -ForegroundColor Red }
 function Green($m)  { Write-Host $m -ForegroundColor Green }
 function Yellow($m) { Write-Host $m -ForegroundColor Yellow }
-function Die($m)    { Red "Error: $m"; exit 1 }
+function Die($m)    { Red "Error: $m"; if ($script:InUi) { throw 'devin-rc error' } else { exit 1 } }
 function Exists($c) { [bool](Get-Command $c -ErrorAction SilentlyContinue) }
 
 # ---- config (JSON: remote, session, devin, distro, remote_mode, remote_distro). Environment variables win over the file.
@@ -112,7 +112,8 @@ function Start-Devin {
     if (Local-Running) {
         if ($Background) { Green "Devin session '$s' is already running."; return }
         Green "Attaching to existing Devin session '$s'."
-        Wsl-Run @('tmux', 'attach-session', '-t', $s); exit $LASTEXITCODE
+        Wsl-Run @('tmux', 'attach-session', '-t', $s); if (-not $script:InUi) { exit $LASTEXITCODE }
+        return
     }
     # wsl --cd takes the Windows path and sets the new session's working
     # directory, so tmux needs no -c and no wslpath round-trip (which would
@@ -124,7 +125,7 @@ function Start-Devin {
         Green "Started Devin session '$s' in background at $full"; return
     }
     Green "Starting Devin in persistent session '$s' at $full"
-    Wsl-RunAt $full @('tmux', 'new-session', '-s', $s, $script:cfg.devin); exit $LASTEXITCODE
+    Wsl-RunAt $full @('tmux', 'new-session', '-s', $s, $script:cfg.devin); if (-not $script:InUi) { exit $LASTEXITCODE }
 }
 
 # Remote command: a POSIX host gets the same tmux one-liner as the bash version; a Windows (WSL) host gets a cmd.exe line.
@@ -147,7 +148,59 @@ function Connect-Remote {
     if (-not $target) { Die "No main PC paired. Run: devin-rc pair user@HOST" }
     if (-not (Exists 'ssh.exe')) { Die "The OpenSSH client is required (Settings > Optional features > OpenSSH Client)." }
     Green "Connecting to $target -> tmux session '$($script:cfg.session)'"
-    & ssh.exe -t @SshOpts $target (Remote-Attach-Cmd); exit $LASTEXITCODE
+    & ssh.exe -t @SshOpts $target (Remote-Attach-Cmd); if (-not $script:InUi) { exit $LASTEXITCODE }
+}
+
+function Show-UiHelp {
+@'
+Slash commands:
+  /status              local + remote session status
+  /ls                  list local + remote tmux sessions
+  /connect [host]      attach to the remote Devin terminal (detach returns here)
+  /start [dir]         start or attach to the local session
+  /bg [dir]            start the local session detached
+  /stop                stop the local session
+  /pair TGT [--wsl] [--distro NAME]
+  /session NAME        switch active session (letters, digits, -, _)
+  /info                show saved config
+  /iphone              iPhone connect instructions
+  /quit                exit (also: q, exit, Ctrl-C)
+'@ | Write-Host
+}
+
+function Interactive-Ui {
+    Write-Host "$App $Version - interactive shell. /help for commands, /quit to exit."
+    $script:InUi = $true
+    while ($true) {
+        $line = Read-Host "devin-rc:$($script:cfg.session)"
+        if ($null -eq $line) { break }
+        $line = $line.Trim()
+        if (-not $line) { continue }
+        $parts = @($line.TrimStart('/') -split '\s+')
+        try {
+            switch ($parts[0]) {
+                { $_ -in 'help', 'h', '?' }       { Show-UiHelp }
+                { $_ -in 'quit', 'q', 'exit' }    { Write-Host 'bye'; return }
+                'status'                          { Show-Status }
+                { $_ -in 'ls', 'sessions' }       { List-Sessions }
+                'info'                            { Show-Info }
+                { $_ -in 'session', 'use' } {
+                    if ($parts.Count -gt 1) {
+                        if ($parts[1] -notmatch '^[a-zA-Z0-9_-]+$') { Red "Invalid session name '$($parts[1])' (allowed: letters, digits, - and _)" }
+                        else { $script:cfg.session = $parts[1] }
+                    } else { Write-Host "session: $($script:cfg.session)" }
+                }
+                { $_ -in 'connect', 'c' }         { Connect-Remote $parts[1] }
+                'start'                           { Start-Devin -Project $parts[1] }
+                { $_ -in 'bg', 'background' }     { Start-Devin -Background -Project $parts[1] }
+                'stop'                            { Stop-Local }
+                'pair'                            { Pair-Client @($parts | Select-Object -Skip 1) }
+                { $_ -in 'iphone', 'ios', 'mobile' } { Iphone-Help }
+                'version'                         { Write-Host "$App $Version" }
+                default                           { Write-Host "unknown command '$line' - try /help" }
+            }
+        } catch { }  # Die already printed the error; return to the prompt
+    }
 }
 
 function Iphone-Help {
@@ -233,6 +286,7 @@ LAPTOP
                                    WSL distro name)
   devin-rc connect [user@HOST]     Attach to the exact persistent Devin terminal
   devin-rc iphone                  iPhone (iOS) connect instructions + command
+  devin-rc ui                      Interactive shell (/status /connect /pair ...)
 
 OTHER
   devin-rc ls | info | version | help
@@ -265,6 +319,7 @@ switch ($cmd) {
     { $_ -in 'bg', 'background' } { Start-Devin -Background -Project $tail[0] }
     { $_ -in 'connect', 'c' }     { Connect-Remote @tail }
     { $_ -in 'iphone', 'ios', 'mobile' } { Iphone-Help }
+    { $_ -in 'ui', 'tui', 'shell' }      { Interactive-Ui }
     'status'     { Show-Status }
     'stop'       { Stop-Local }
     { $_ -in 'ls', 'sessions' }   { List-Sessions }

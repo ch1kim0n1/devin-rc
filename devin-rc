@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 APP="devin-rc"
-VERSION="1.4.0"
+VERSION="1.5.0"
 SESSION_DEFAULT="devin"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/devin-rc"
 CONFIG_FILE="$CONFIG_DIR/config"
@@ -158,10 +158,12 @@ start_devin() {
 
   if tmux has-session -t "$SESSION" 2>/dev/null; then
     green "Attaching to existing Devin session '$SESSION'."
+    if [[ "${IN_UI:-}" == 1 ]]; then tmux attach-session -t "$SESSION"; return; fi
     exec tmux attach-session -t "$SESSION"
   fi
 
   green "Starting Devin in persistent session '$SESSION' at $project"
+  if [[ "${IN_UI:-}" == 1 ]]; then tmux new-session -s "$SESSION" -c "$project" "$DEVIN_CMD"; return; fi
   exec tmux new-session -s "$SESSION" -c "$project" "$DEVIN_CMD"
 }
 
@@ -222,6 +224,7 @@ connect_remote() {
   need ssh "An SSH client is required."
 
   green "Connecting to $target → tmux session '$SESSION'"
+  if [[ "${IN_UI:-}" == 1 ]]; then ssh -t "${SSH_OPTS[@]}" "$target" "$(remote_attach_cmd)"; return; fi
   exec ssh -t "${SSH_OPTS[@]}" "$target" "$(remote_attach_cmd)"
 }
 
@@ -318,6 +321,57 @@ show_info() {
   printf 'version: %s\n' "$VERSION"
 }
 
+ui_help() {
+  cat <<'TXT'
+Slash commands:
+  /status              local + remote session status
+  /ls                  list local + remote tmux sessions
+  /connect [host]      attach to the remote Devin terminal (detach returns here)
+  /start [dir]         start or attach to the local session
+  /bg [dir]            start the local session detached
+  /stop                stop the local session
+  /pair TGT [--wsl] [--distro NAME]
+  /session NAME        switch active session (letters, digits, -, _)
+  /info                show saved config
+  /iphone              iPhone connect instructions
+  /quit                exit (also: q, exit, Ctrl-d)
+TXT
+}
+
+interactive_ui() {
+  printf '%s %s — interactive shell. /help for commands, /quit to exit.\n' "$APP" "$VERSION"
+  IN_UI=1
+  while true; do
+    local line
+    IFS= read -erp "$(printf '\033[36mdevin-rc:%s>\033[0m ' "$SESSION")" line \
+      || { printf '\n'; break; }
+    line="${line#"${line%%[![:space:]]*}"}"
+    [[ -z "$line" ]] && continue
+    set -- ${line#/}
+    # commands run in subshells so a die() returns to the prompt instead of
+    # killing the shell; /session and /pair need main-shell persistence
+    case "${1:-}" in
+      help|h|\?)    ui_help ;;
+      quit|q|exit)  break ;;
+      status)       ( status_cmd ) || true ;;
+      ls|sessions)  ( list_sessions ) || true ;;
+      info)         ( show_info ) || true ;;
+      session|use)  if [[ -n "${2:-}" ]]; then
+                      if ( SESSION="$2"; validate_session ); then SESSION="$2"; fi
+                    else printf 'session: %s\n' "$SESSION"; fi ;;
+      connect|c)    ( connect_remote "${2:-}" ) || true ;;
+      start)        ( start_devin "${2:-}" ) || true ;;
+      bg|background) ( start_background "${2:-}" ) || true ;;
+      stop)         ( stop_local ) || true ;;
+      pair)         shift || true; if ( pair_client "$@" ); then load_config; fi ;;
+      iphone|ios|mobile) ( iphone_help ) || true ;;
+      version)      printf '%s %s\n' "$APP" "$VERSION" ;;
+      *)            printf "unknown command '%s' — try /help\n" "$line" ;;
+    esac
+  done
+  printf 'bye\n'
+}
+
 usage() {
   cat <<'TXT'
 devin-rc — persistent remote control for Devin CLI
@@ -336,6 +390,7 @@ LAPTOP
                               Devin in WSL; --distro: its WSL distro name)
   devin-rc connect [user@HOST]  Attach to the exact persistent Devin terminal
   devin-rc iphone               iPhone (iOS) connect instructions + command
+  devin-rc ui                   Interactive shell (/status /connect /pair ...)
 
 OTHER
   devin-rc ls                   List local and remote tmux sessions
@@ -379,6 +434,7 @@ case "$cmd" in
   bg|background) start_background "$@" ;;
   connect|c) connect_remote "$@" ;;
   iphone|ios|mobile) iphone_help "$@" ;;
+  ui|tui|shell)    interactive_ui ;;
   status) status_cmd "$@" ;;
   stop) stop_local "$@" ;;
   ls|sessions) list_sessions "$@" ;;
