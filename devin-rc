@@ -2,13 +2,21 @@
 set -Eeuo pipefail
 
 APP="devin-rc"
-VERSION="1.1.0"
+VERSION="1.3.0"
 SESSION_DEFAULT="devin"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/devin-rc"
 CONFIG_FILE="$CONFIG_DIR/config"
+
+# Environment variables win over the saved config; capture them before sourcing.
+ENV_SESSION="${SESSION:-}"
+ENV_REMOTE="${REMOTE:-}"
+ENV_DEVIN_CMD="${DEVIN_CMD:-}"
+
 SESSION="$SESSION_DEFAULT"
 REMOTE=""
-DEVIN_CMD="${DEVIN_CMD:-devin}"
+REMOTE_MODE="posix"
+REMOTE_DISTRO=""
+DEVIN_CMD="devin"
 SSH_OPTS=(-o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=2)
 
 red(){ printf '\033[31m%s\033[0m\n' "$*" >&2; }
@@ -22,18 +30,23 @@ load_config() {
     # shellcheck disable=SC1090
     source "$CONFIG_FILE"
   fi
-  SESSION="${SESSION:-$SESSION_DEFAULT}"
-  DEVIN_CMD="${DEVIN_CMD:-devin}"
+  SESSION="${ENV_SESSION:-${SESSION:-$SESSION_DEFAULT}}"
+  REMOTE="${ENV_REMOTE:-${REMOTE:-}}"
+  DEVIN_CMD="${ENV_DEVIN_CMD:-${DEVIN_CMD:-devin}}"
 }
 
 save_config() {
   mkdir -p "$CONFIG_DIR"
-  umask 077
-  cat > "$CONFIG_FILE" <<CFG
+  (
+    umask 077
+    cat > "$CONFIG_FILE" <<CFG
 REMOTE=$(printf '%q' "${REMOTE:-}")
+REMOTE_MODE=$(printf '%q' "${REMOTE_MODE:-posix}")
+REMOTE_DISTRO=$(printf '%q' "${REMOTE_DISTRO:-}")
 SESSION=$(printf '%q' "${SESSION:-$SESSION_DEFAULT}")
 DEVIN_CMD=$(printf '%q' "${DEVIN_CMD:-devin}")
 CFG
+  )
 }
 
 # tmux forbids ':' and '.' in session names; restricting to a safe charset also
@@ -81,6 +94,7 @@ install_tmux_linux() {
 
 host_setup() {
   case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) die "On Windows use the PowerShell version: devin-rc.ps1 (run install.ps1; see README, Windows)." ;;
     Linux)  install_tmux_linux ;;
     Darwin) install_tmux_macos ;;
     *) die "setup-host supports Linux and macOS hosts. Clients can be macOS or Linux." ;;
@@ -111,13 +125,28 @@ host_setup() {
 }
 
 pair_client() {
-  local target="${1:-}"
-  [[ -n "$target" ]] || die "Usage: devin-rc pair user@HOST"
-  [[ "$target" != -* && "$target" != *[[:space:]]* ]] \
+  local target="" mode="posix" distro=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --wsl) mode="wsl"; shift ;;
+      --distro)
+        [[ $# -ge 2 && "$2" != -* ]] || die "--distro requires a name"
+        distro="$2"; shift 2 ;;
+      --distro=*) distro="${1#--distro=}"; shift ;;
+      -*) die "Unknown flag '$1' for pair" ;;
+      *)
+        [[ -z "$target" ]] || die "Usage: devin-rc pair user@HOST [--wsl] [--distro NAME]"
+        target="$1"; shift ;;
+    esac
+  done
+  [[ -n "$target" ]] || die "Usage: devin-rc pair user@HOST [--wsl] [--distro NAME]"
+  [[ "$target" != *[[:space:]]* ]] \
     || die "Invalid target '$target' (expected: user@HOST or HOST)"
-  REMOTE="$target"
+  [[ -z "$distro" || "$distro" =~ ^[a-zA-Z0-9_.-]+$ ]] \
+    || die "Invalid distro name '$distro'"
+  REMOTE="$target"; REMOTE_MODE="$mode"; REMOTE_DISTRO="$distro"
   save_config
-  green "Saved remote: $REMOTE"
+  green "Saved remote: $REMOTE ($mode host${distro:+, distro $distro})"
 }
 
 start_devin() {
@@ -152,13 +181,48 @@ start_background() {
   green "Started Devin session '$SESSION' in background at $project"
 }
 
+# One-liners executed by the remote host's default shell. POSIX hosts get a sh
+# pipeline; Windows (WSL) hosts get a cmd.exe line because that is the default
+# shell of the Windows OpenSSH server.
+remote_distro_flag() {
+  if [[ -n "$REMOTE_DISTRO" ]]; then printf -- '-d %s ' "$REMOTE_DISTRO"; fi
+}
+
+remote_attach_cmd() {
+  local s="$SESSION" d
+  if [[ "$REMOTE_MODE" == "wsl" ]]; then
+    d="$(remote_distro_flag)"
+    printf 'wsl.exe %s-e tmux has-session -t %s 2>nul && wsl.exe %s-e tmux attach-session -t %s || echo Devin RC session is not running. On the main PC run: devin-rc start <project>' "$d" "$s" "$d" "$s"
+  else
+    printf "command -v tmux >/dev/null || { echo 'tmux missing on host'; exit 1; }; tmux has-session -t '%s' 2>/dev/null || { echo 'Devin RC session is not running. On the main PC run: devin-rc start <project>'; exit 2; }; exec tmux attach-session -t '%s'" "$s" "$s"
+  fi
+}
+
+remote_state_cmd() {
+  local s="$SESSION" d
+  if [[ "$REMOTE_MODE" == "wsl" ]]; then
+    d="$(remote_distro_flag)"
+    printf 'wsl.exe %s-e tmux has-session -t %s 2>nul && echo RUNNING || echo STOPPED' "$d" "$s"
+  else
+    printf "if command -v tmux >/dev/null && tmux has-session -t '%s' 2>/dev/null; then echo RUNNING; else echo STOPPED; fi" "$s"
+  fi
+}
+
+remote_ls_cmd() {
+  if [[ "$REMOTE_MODE" == "wsl" ]]; then
+    printf 'wsl.exe %s-e tmux ls' "$(remote_distro_flag)"
+  else
+    printf 'command -v tmux >/dev/null && tmux ls 2>/dev/null || true'
+  fi
+}
+
 connect_remote() {
   local target="${1:-${REMOTE:-}}"
   [[ -n "$target" ]] || die "No main PC paired. Run: devin-rc pair user@HOST"
   need ssh "An SSH client is required."
 
   green "Connecting to $target → tmux session '$SESSION'"
-  exec ssh -t "${SSH_OPTS[@]}" "$target" "command -v tmux >/dev/null || { echo 'tmux missing on host'; exit 1; }; tmux has-session -t '$SESSION' 2>/dev/null || { echo 'Devin RC session is not running. On the main PC run: devin-rc start <project>'; exit 2; }; exec tmux attach-session -t '$SESSION'"
+  exec ssh -t "${SSH_OPTS[@]}" "$target" "$(remote_attach_cmd)"
 }
 
 status_cmd() {
@@ -176,7 +240,7 @@ status_cmd() {
     fi
     local out
     if out="$(ssh "${SSH_OPTS[@]}" -o BatchMode=yes "$REMOTE" \
-      "if command -v tmux >/dev/null && tmux has-session -t '$SESSION' 2>/dev/null; then echo RUNNING; else echo STOPPED; fi" 2>/dev/null)"; then
+      "$(remote_state_cmd)" 2>/dev/null)"; then
       printf 'REMOTE %-9s host=%s session=%s\n' "$out" "$REMOTE" "$SESSION"
     else
       printf 'REMOTE UNREACHABLE host=%s\n' "$REMOTE"
@@ -204,8 +268,7 @@ list_sessions() {
   if [[ -n "${REMOTE:-}" ]]; then
     printf '%s\n' "-- $REMOTE --"
     if exists ssh; then
-      ssh "${SSH_OPTS[@]}" -o BatchMode=yes "$REMOTE" \
-        "command -v tmux >/dev/null && tmux ls 2>/dev/null || true" \
+      ssh "${SSH_OPTS[@]}" -o BatchMode=yes "$REMOTE" "$(remote_ls_cmd)" \
         || printf '(unreachable)\n'
     else
       printf '(no ssh client)\n'
@@ -215,7 +278,11 @@ list_sessions() {
 
 show_info() {
   printf 'session: %s\n' "$SESSION"
-  printf 'remote:  %s\n' "${REMOTE:-<not paired>}"
+  if [[ -n "${REMOTE:-}" ]]; then
+    printf 'remote:  %s (%s host%s)\n' "$REMOTE" "${REMOTE_MODE:-posix}" "${REMOTE_DISTRO:+, distro $REMOTE_DISTRO}"
+  else
+    printf 'remote:  <not paired>\n'
+  fi
   printf 'devin:   %s\n' "$DEVIN_CMD"
   printf 'config:  %s\n' "$CONFIG_FILE"
   printf 'version: %s\n' "$VERSION"
@@ -233,7 +300,10 @@ MAIN PC
   devin-rc stop                 Stop the local Devin session
 
 LAPTOP
-  devin-rc pair user@HOST       Save the main PC's Tailscale address
+  devin-rc pair user@HOST [--wsl] [--distro NAME]
+                              Save the main PC's address (HOST alone uses your
+                              local username; --wsl: the host is Windows with
+                              Devin in WSL; --distro: its WSL distro name)
   devin-rc connect [user@HOST]  Attach to the exact persistent Devin terminal
 
 OTHER
@@ -261,7 +331,7 @@ while [[ "${1:-}" == -* ]]; do
     -s|--session)
       [[ $# -ge 2 && "$2" != -* ]] || die "$1 requires a session name"
       SESSION="$2"; shift 2 ;;
-    -V|--version|version)
+    -V|--version)
       printf '%s %s\n' "$APP" "$VERSION"; exit 0 ;;
     -h|--help)
       usage; exit 0 ;;
