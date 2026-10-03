@@ -4,7 +4,7 @@
 #   Host (main PC): start / bg / stop / setup-host run Devin inside tmux in WSL2 (tmux has no native Windows build).
 $ErrorActionPreference = 'Continue'  # native stderr is expected (ssh/wsl failures are handled explicitly via exit codes)
 $App = 'devin-rc'
-$Version = '1.3.0'
+$Version = '1.4.0'
 $SessionDefault = 'devin'
 $ConfigDir = if ($env:DEVIN_RC_HOME) { $env:DEVIN_RC_HOME } else { Join-Path $env:APPDATA 'devin-rc' }
 $ConfigFile = Join-Path $ConfigDir 'config.json'
@@ -150,6 +150,27 @@ function Connect-Remote {
     & ssh.exe -t @SshOpts $target (Remote-Attach-Cmd); exit $LASTEXITCODE
 }
 
+function Iphone-Help {
+    $remote = $script:cfg.remote
+    if (-not $remote) { Die "No main PC paired. Run: devin-rc pair user@HOST" }
+    $attach = Remote-Attach-Cmd
+    if ($remote -match '@') { $user, $host_ = $remote -split '@', 2 } else { $user = $env:USERNAME; $host_ = $remote }
+    Write-Host ""
+    Write-Host "iPhone setup"
+    Write-Host "  1. Install Tailscale (App Store) and sign in to the same tailnet."
+    Write-Host "  2. Install an SSH app - Blink Shell is the best tmux client (real Ctrl key);"
+    Write-Host "     Termius and the free iSH emulator also work."
+    Write-Host "  3. Paste this command into the SSH app:"
+    Write-Host ""
+    Write-Host "  ssh -t $($SshOpts -join ' ') $remote `"$attach`""
+    Write-Host ""
+    Write-Host "One-tap connect via the Shortcuts app: action 'Run script over SSH' with"
+    Write-Host "  Host: $host_    Port: 22    User: $user"
+    Write-Host "  Script: $attach"
+    Write-Host ""
+    Write-Host "Detach without stopping Devin: Ctrl-b, then d (Blink shows Ctrl on its bar)."
+}
+
 function Show-Status {
     $s = $script:cfg.session
     if (Local-Running) { Green "LOCAL  RUNNING   session=$s" } else { Write-Host "LOCAL  STOPPED   session=$s" }
@@ -211,6 +232,7 @@ LAPTOP
                                    username; --wsl: the host is a Windows PC using WSL; --distro: its
                                    WSL distro name)
   devin-rc connect [user@HOST]     Attach to the exact persistent Devin terminal
+  devin-rc iphone                  iPhone (iOS) connect instructions + command
 
 OTHER
   devin-rc ls | info | version | help
@@ -242,6 +264,7 @@ switch ($cmd) {
     'start'      { Start-Devin -Project $tail[0] }
     { $_ -in 'bg', 'background' } { Start-Devin -Background -Project $tail[0] }
     { $_ -in 'connect', 'c' }     { Connect-Remote @tail }
+    { $_ -in 'iphone', 'ios', 'mobile' } { Iphone-Help }
     'status'     { Show-Status }
     'stop'       { Stop-Local }
     { $_ -in 'ls', 'sessions' }   { List-Sessions }

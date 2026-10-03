@@ -10,7 +10,8 @@ It does **not** clone or hand off the Devin session. Devin runs on the main PC i
 
 - Main PC: macOS or Linux, Devin CLI, Tailscale
 - Laptop: macOS or Linux, Tailscale + SSH
-- Both devices signed into the same Tailscale network
+- iPhone: iOS with Tailscale + an SSH app (Blink Shell, Termius, or iSH)
+- All devices signed into the same Tailscale network
 
 On macOS, `setup-host` installs tmux via Homebrew and requires the **standalone** Tailscale build (`brew install tailscale` or the package from tailscale.com) — the App Store app does not include the SSH server.
 
@@ -85,6 +86,7 @@ devin-rc pair user@host [--wsl] [--distro NAME]
 devin-rc status          # local + remote state
 devin-rc ls              # list local + remote tmux sessions
 devin-rc stop
+devin-rc iphone          # iPhone (iOS) connect instructions + command
 devin-rc info
 devin-rc version
 ```
@@ -131,6 +133,22 @@ Windows-specific notes:
 - Multiple WSL distros: set `DEVIN_RC_DISTRO`. Config lives in `%APPDATA%\devin-rc\config.json` (override with `DEVIN_RC_HOME`).
 - The bash version also works as a client under Git Bash, including `pair --wsl`; its `setup-host` stops with a pointer to the PowerShell version.
 - The client side was tested on Windows 11 (PowerShell 7 and 5.1, the cmd and Git Bash shims, install and uninstall). The host side (WSL) is the less tested path: if `wsl -l -v` shows a distro that does not start, repair or reinstall it first.
+
+## iPhone
+
+The iPhone is a client like the laptop — attach over Tailscale + SSH:
+
+1. Install **Tailscale** (App Store) and sign in to the same tailnet.
+2. Install an SSH app. **Blink Shell** is the best tmux client (real Ctrl key on the shortcut bar); Termius and the free iSH emulator also work.
+3. Run `devin-rc iphone` on a paired machine (or check `devin-rc info`) — it prints the exact SSH command plus an iOS **Shortcuts** recipe for one-tap connects. It boils down to:
+
+   ```bash
+   ssh -t vlad@100.101.102.103 "tmux has-session -t devin 2>/dev/null && exec tmux attach-session -t devin"
+   ```
+
+   (the real printed command also reports "not running" if the host session is down, and targets the session from `-s`/`SESSION`; for a Windows host it is the `wsl.exe ... tmux attach` variant).
+
+iSH can even run the full bash client: `apk add openssh-client`, then `devin-rc pair` / `devin-rc connect` work as usual.
 
 ## Important limitation
 

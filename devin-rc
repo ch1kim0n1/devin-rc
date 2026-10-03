@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 APP="devin-rc"
-VERSION="1.3.0"
+VERSION="1.4.0"
 SESSION_DEFAULT="devin"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/devin-rc"
 CONFIG_FILE="$CONFIG_DIR/config"
@@ -225,6 +225,36 @@ connect_remote() {
   exec ssh -t "${SSH_OPTS[@]}" "$target" "$(remote_attach_cmd)"
 }
 
+iphone_help() {
+  [[ -n "${REMOTE:-}" ]] || die "No main PC paired. Run: devin-rc pair user@HOST"
+  local attach host user
+  attach="$(remote_attach_cmd)"
+  if [[ "$REMOTE" == *@* ]]; then
+    user="${REMOTE%%@*}"; host="${REMOTE##*@}"
+  else
+    host="$REMOTE"; user="$(id -un)"
+  fi
+  cat <<EOF
+
+iPhone setup
+  1. Install Tailscale (App Store) and sign in to the same tailnet.
+  2. Install an SSH app — Blink Shell is the best tmux client (real Ctrl key);
+     Termius and the free iSH emulator also work.
+  3. Paste this command into the SSH app:
+
+  ssh -t ${SSH_OPTS[*]} $REMOTE "$attach"
+
+One-tap connect via the Shortcuts app: action "Run script over SSH" with
+  Host: $host    Port: 22    User: $user
+  Script: $attach
+
+iSH can even run this client natively: apk add openssh-client, then use
+devin-rc pair / connect inside iSH.
+
+Detach without stopping Devin: Ctrl-b, then d (Blink shows Ctrl on its bar).
+EOF
+}
+
 status_cmd() {
   if exists tmux && tmux has-session -t "$SESSION" 2>/dev/null; then
     green "LOCAL  RUNNING   session=$SESSION"
@@ -305,6 +335,7 @@ LAPTOP
                               local username; --wsl: the host is Windows with
                               Devin in WSL; --distro: its WSL distro name)
   devin-rc connect [user@HOST]  Attach to the exact persistent Devin terminal
+  devin-rc iphone               iPhone (iOS) connect instructions + command
 
 OTHER
   devin-rc ls                   List local and remote tmux sessions
@@ -347,6 +378,7 @@ case "$cmd" in
   start) start_devin "$@" ;;
   bg|background) start_background "$@" ;;
   connect|c) connect_remote "$@" ;;
+  iphone|ios|mobile) iphone_help "$@" ;;
   status) status_cmd "$@" ;;
   stop) stop_local "$@" ;;
   ls|sessions) list_sessions "$@" ;;
